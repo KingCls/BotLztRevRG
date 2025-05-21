@@ -12,13 +12,14 @@ import os
 import time 
 import uuid  # Para gerar IDs únicos para os clientes
 
+
 # --- Constantes e Configuração ---
 SEEN_IDS_FILE = "seen_ids.json"
 SEEN_IDS_INTERNATIONAL_FILE = "seen_ids_international.json"  # Arquivo separado para contas internacionais
 ACCOUNT_MAPPING_FILE = "account_mapping.json"  # Para mapeamento entre IDs únicos e reais
 ACCOUNT_MAPPING_INTERNATIONAL_FILE = "account_mapping_international.json"  # Para contas internacionais
 MARGIN_CONFIG_FILE = "margin_config.json"  # Para armazenar a configuração de margem
-POLLING_INTERVAL_SECONDS = 60
+POLLING_INTERVAL_SECONDS = 90
 API_TIMEOUT = 20 
 kast_zero_ids_time = 0
 in_cooldown_mode = False
@@ -31,6 +32,8 @@ SKIN_THUMB_SIZE = (100, 40)
 MAX_NEW_ACCOUNTS_PER_CYCLE = 3
 FETCH_DETAILS_DELAY = 5
 EXCHANGE_RATE_UPDATE_HOURS = 6
+poll_international = False
+
 
 # Variáveis globais
 seen_item_ids = set()
@@ -154,31 +157,65 @@ def fetch_listings_sync(url, headers):
     for attempt in range(max_retries):
         try:
             print(f"[LZT-LIST SYNC] GET: {url} (tentativa {attempt+1}/{max_retries})")
-            response = requests.get(url, headers=headers, timeout=API_TIMEOUT)
+            custom_headers = {
+                **headers,
+                "User-Agent": "Mozilla/5.0 (ValorantStoreBot/1.0)"
+            }
+            response = requests.get(url, headers=custom_headers, timeout=API_TIMEOUT)
             print(f"[LZT-LIST SYNC] Status: {response.status_code}")
             
             if response.status_code == 200:
                 return response.json()
+            elif response.status_code == 429: # Tratar especificamente o erro 429
+                # Tenta obter o valor do cabeçalho 'Retry-After' se disponível
+                retry_after_header = response.headers.get('Retry-After')
+                wait_time = retry_delay * (attempt + 1) # Aumenta o delay a cada tentativa
+                if retry_after_header:
+                    try:
+                        wait_time = int(retry_after_header)
+                        print(f"[LZT-LIST SYNC] Erro 429 (Too Many Requests). Respeitando 'Retry-After': {wait_time} segundos.")
+                    except ValueError:
+                        print(f"[LZT-LIST SYNC] Erro 429 (Too Many Requests). 'Retry-After' com valor inválido: {retry_after_header}. Usando delay padrão: {wait_time} segundos.")
+                else:
+                    print(f"[LZT-LIST SYNC] Erro 429 (Too Many Requests). Tentando novamente em {wait_time} segundos...")
+                
+                if attempt < max_retries - 1: # Só tenta novamente se não for a última tentativa
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    print(f"[LZT-LIST SYNC] Erro 429 (Too Many Requests). Máximo de tentativas atingido.")
+                    return None # Retorna None após todas as tentativas falharem
+
             elif response.status_code >= 500:  # Erro do servidor
-                print(f"[LZT-LIST SYNC] Erro do servidor: {response.status_code}. Tentando novamente...")
-                time.sleep(retry_delay)
-                continue
+                print(f"[LZT-LIST SYNC] Erro do servidor: {response.status_code}. Tentando novamente em {retry_delay} segundos...")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    print(f"[LZT-LIST SYNC] Erro do servidor. Máximo de tentativas atingido.")
+                    return None
             else:
-                print(f"[LZT-LIST SYNC] Erro não-recuperável: {response.status_code}")
+                print(f"[LZT-LIST SYNC] Erro não-recuperável: {response.status_code} - {response.text}")
                 return None
                 
         except requests.exceptions.Timeout:
-            print(f"[LZT-LIST SYNC] Timeout. Tentando novamente...")
-            time.sleep(retry_delay)
-            continue
+            print(f"[LZT-LIST SYNC] Timeout. Tentando novamente em {retry_delay} segundos...")
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+                continue
+            else:
+                print(f"[LZT-LIST SYNC] Timeout. Máximo de tentativas atingido.")
+                return None
         except Exception as e:
             print(f"[LZT-LIST SYNC] Exceção: {e}")
             if attempt < max_retries - 1:
                 print(f"[LZT-LIST SYNC] Tentando novamente em {retry_delay} segundos...")
                 time.sleep(retry_delay)
             else:
+                print(f"[LZT-LIST SYNC] Exceção. Máximo de tentativas atingido.")
                 return None
     
+    print(f"[LZT-LIST SYNC] Falha ao buscar dados após {max_retries} tentativas.") # Mensagem se sair do loop sem retornar
     return None
 
 def get_valorant_skin_details_sync(skin_uuid):
@@ -1058,8 +1095,15 @@ async def on_ready():
     
     if not update_exchange_rate.is_running():
         update_exchange_rate.start() # Inicia loop da taxa de câmbio
+    
     if not check_new_accounts.is_running():
         check_new_accounts.start()
+    
+    # Adicionar um atraso antes de iniciar a tarefa de contas internacionais
+    # Ajuste o tempo de espera conforme necessário (ex: 10-15 segundos)
+    print("[INFO] Aguardando para iniciar a verificação de contas internacionais para evitar rate limit...")
+    await asyncio.sleep(15) 
+    
     if not check_new_international_accounts.is_running():
         check_new_international_accounts.start()
 
